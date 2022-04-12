@@ -4,8 +4,11 @@
 #include <linux/init.h>
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#define LL_MSB_MASK 0x8000000000000000
+#define LL_LSB_MASK 1
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -24,23 +27,103 @@ static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
-{
-    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    long long f[k + 2];
+struct BigN {
+    unsigned long long upper, lower;
+};
 
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
-    }
-
-    return f[k];
+// Addition
+static inline struct BigN addBigN(struct BigN x, struct BigN y) {
+    struct BigN output = {0};
+    output.upper = x.upper + y.upper;
+    if (y.lower > ~x.lower) output.upper++;
+    output.lower = x.lower + y.lower;
+    return output;
 }
 
-static int fib_open(struct inode *inode, struct file *file)
-{
+// Subtraction
+static inline struct BigN subBigN(struct BigN x, struct BigN y) {
+    struct BigN output = {0};
+    output.upper = x.upper - y.upper;
+    if (y.lower > x.lower) output.upper--;
+    output.lower = x.lower - y.lower;
+    return output;
+}
+
+// Left Shift
+static inline struct BigN lshiftBigN(struct BigN x) {
+    x.upper <<= 1;
+    x.upper |=
+        (x.lower & LL_MSB_MASK) >> ((sizeof(unsigned long long) << 3) - 1);
+    x.lower <<= 1;
+    return x;
+}
+
+// Right Shift
+static inline struct BigN rshiftBigN(struct BigN x) {
+    x.lower >>= 1;
+    x.lower |= (x.upper & LL_LSB_MASK)
+               << ((sizeof(unsigned long long) << 3) - 1);
+    x.upper >>= 1;
+    return x;
+}
+
+// Multiplication
+static struct BigN productBigN(struct BigN x, struct BigN y) {
+    struct BigN output = {0};
+    while (x.upper || x.lower) {
+        if (x.lower & 1) output = addBigN(output, y);
+        x = rshiftBigN(x);
+        y = lshiftBigN(y);
+    }
+    return output;
+}
+
+static struct BigN fib_sequence_BigN(long long k) {
+    struct BigN a = {.upper = 0, .lower = 0};
+    struct BigN b = {.upper = 0, .lower = 1};
+
+    for (int i = ((sizeof(long long) << 3) - __builtin_clzll(k)); i >= 1; i--) {
+        struct BigN t1 = productBigN(a, subBigN(lshiftBigN(b), a));
+        struct BigN t2 = addBigN(productBigN(b, b), productBigN(a, a));
+        a = t1;
+        b = t2;
+        if (k & (1 << (i - 1))) {
+            t1 = addBigN(a, b);
+            a = b;
+            b = t1;
+        }
+    }
+    return a;
+}
+/*
+static long long fib_sequence(long long k) {
+    long long a = 0, b = 1;
+    for (int i = ((sizeof(long long) << 3) - __builtin_clzll(k)); i >= 1; i--) {
+        long long t1 = a * (2 * b - a);
+        long long t2 = b * b + a * a;
+        a = t1;
+        b = t2;
+        if (k & (1 << (i - 1))) {
+            t1 = a + b;
+            a = b;
+            b = t1;
+        }
+    }
+
+    return a;
+}
+*/
+
+static ktime_t kt;
+
+static struct BigN fib_time_proxy_BigN(long long k) {
+    kt = ktime_get();
+    struct BigN result = fib_sequence_BigN(k);
+    kt = ktime_sub(ktime_get(), kt);
+    return result;
+}
+
+static int fib_open(struct inode *inode, struct file *file) {
     if (!mutex_trylock(&fib_mutex)) {
         printk(KERN_ALERT "fibdrv is in use");
         return -EBUSY;
@@ -48,50 +131,43 @@ static int fib_open(struct inode *inode, struct file *file)
     return 0;
 }
 
-static int fib_release(struct inode *inode, struct file *file)
-{
+static int fib_release(struct inode *inode, struct file *file) {
     mutex_unlock(&fib_mutex);
     return 0;
 }
 
 /* calculate the fibonacci number at given offset */
-static ssize_t fib_read(struct file *file,
-                        char *buf,
-                        size_t size,
-                        loff_t *offset)
-{
-    return (ssize_t) fib_sequence(*offset);
+static ssize_t fib_read(struct file *file, char *buf, size_t size,
+                        loff_t *offset) {
+    struct BigN output = fib_time_proxy_BigN(*offset);
+    copy_to_user(buf, &output, sizeof(struct BigN));
+    return (ssize_t)sizeof(struct BigN);
 }
 
 /* write operation is skipped */
-static ssize_t fib_write(struct file *file,
-                         const char *buf,
-                         size_t size,
-                         loff_t *offset)
-{
-    return 1;
+static ssize_t fib_write(struct file *file, const char *buf, size_t size,
+                         loff_t *offset) {
+    return ktime_to_ns(kt);
 }
 
-static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
-{
+static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig) {
     loff_t new_pos = 0;
     switch (orig) {
-    case 0: /* SEEK_SET: */
-        new_pos = offset;
-        break;
-    case 1: /* SEEK_CUR: */
-        new_pos = file->f_pos + offset;
-        break;
-    case 2: /* SEEK_END: */
-        new_pos = MAX_LENGTH - offset;
-        break;
+        case 0: /* SEEK_SET: */
+            new_pos = offset;
+            break;
+        case 1: /* SEEK_CUR: */
+            new_pos = file->f_pos + offset;
+            break;
+        case 2: /* SEEK_END: */
+            new_pos = MAX_LENGTH - offset;
+            break;
     }
 
-    if (new_pos > MAX_LENGTH)
-        new_pos = MAX_LENGTH;  // max case
-    if (new_pos < 0)
-        new_pos = 0;        // min case
-    file->f_pos = new_pos;  // This is what we'll use now
+    // if (new_pos > MAX_LENGTH)
+    //     new_pos = MAX_LENGTH;  // max case
+    if (new_pos < 0) new_pos = 0;  // min case
+    file->f_pos = new_pos;         // This is what we'll use now
     return new_pos;
 }
 
@@ -104,10 +180,8 @@ const struct file_operations fib_fops = {
     .llseek = fib_device_lseek,
 };
 
-static int __init init_fib_dev(void)
-{
+static int __init init_fib_dev(void) {
     int rc = 0;
-
     mutex_init(&fib_mutex);
 
     // Let's register the device
@@ -159,8 +233,7 @@ failed_cdev:
     return rc;
 }
 
-static void __exit exit_fib_dev(void)
-{
+static void __exit exit_fib_dev(void) {
     mutex_destroy(&fib_mutex);
     device_destroy(fib_class, fib_dev);
     class_destroy(fib_class);

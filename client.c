@@ -7,13 +7,13 @@
 
 #define FIB_DEV "/dev/fibonacci"
 
-int main()
-{
+int main() {
     long long sz;
 
-    char buf[1];
+    char buf[16];
+    unsigned long long *ptr = buf;
     char write_buf[] = "testing writing";
-    int offset = 100; /* TODO: try test something bigger than the limit */
+    int offset = 150; /* TODO: try test something bigger than the limit */
 
     int fd = open(FIB_DEV, O_RDWR);
     if (fd < 0) {
@@ -28,20 +28,30 @@ int main()
 
     for (int i = 0; i <= offset; i++) {
         lseek(fd, i, SEEK_SET);
-        sz = read(fd, buf, 1);
-        printf("Reading from " FIB_DEV
-               " at offset %d, returned the sequence "
-               "%lld.\n",
-               i, sz);
+        read(fd, buf, 16);
+        sz = write(fd, write_buf, strlen(write_buf));
+        // printf("Reading from " FIB_DEV
+        //       " at offset %d, returned the sequence "
+        //       "%lld.\n",
+        //       i, sz);
+        printf("Reading from " FIB_DEV " at offset %d, returned the sequence ",
+               i);
+        printf("%llx%016llx.\n", *ptr, *(ptr + 1));
+        printf("time: %lld\n", sz);
     }
 
     for (int i = offset; i >= 0; i--) {
         lseek(fd, i, SEEK_SET);
-        sz = read(fd, buf, 1);
-        printf("Reading from " FIB_DEV
-               " at offset %d, returned the sequence "
-               "%lld.\n",
-               i, sz);
+        read(fd, buf, 16);
+        sz = write(fd, NULL, 0);
+        // printf("Reading from " FIB_DEV
+        //       " at offset %d, returned the sequence "
+        //       "%lld.\n",
+        //       i, sz);
+        printf("Reading from " FIB_DEV " at offset %d, returned the sequence ",
+               i);
+        printf("%llx%016llx.\n", *ptr, *(ptr + 1));
+        printf("time: %lld\n", sz);
     }
 
     close(fd);
