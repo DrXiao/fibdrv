@@ -81,7 +81,7 @@ static struct BigN productBigN(struct BigN x, struct BigN y) {
 static struct BigN fib_sequence_BigN(long long k) {
     struct BigN a = {.upper = 0, .lower = 0};
     struct BigN b = {.upper = 0, .lower = 1};
-
+    if (k == 0) goto RETVAL;
     for (int i = ((sizeof(long long) << 3) - __builtin_clzll(k)); i >= 1; i--) {
         struct BigN t1 = productBigN(a, subBigN(lshiftBigN(b), a));
         struct BigN t2 = addBigN(productBigN(b, b), productBigN(a, a));
@@ -93,8 +93,10 @@ static struct BigN fib_sequence_BigN(long long k) {
             b = t1;
         }
     }
+RETVAL:
     return a;
 }
+
 /*
 static long long fib_sequence(long long k) {
     long long a = 0, b = 1;
@@ -114,12 +116,12 @@ static long long fib_sequence(long long k) {
 }
 */
 
-static ktime_t kt;
+static ktime_t fib_kt;
 
 static struct BigN fib_time_proxy_BigN(long long k) {
-    kt = ktime_get();
+    fib_kt = ktime_get();
     struct BigN result = fib_sequence_BigN(k);
-    kt = ktime_sub(ktime_get(), kt);
+    fib_kt = ktime_sub(ktime_get(), fib_kt);
     return result;
 }
 
@@ -136,18 +138,27 @@ static int fib_release(struct inode *inode, struct file *file) {
     return 0;
 }
 
+static ktime_t cpy_to_user_kt;
 /* calculate the fibonacci number at given offset */
 static ssize_t fib_read(struct file *file, char *buf, size_t size,
                         loff_t *offset) {
     struct BigN output = fib_time_proxy_BigN(*offset);
+    cpy_to_user_kt = ktime_get();
     copy_to_user(buf, &output, sizeof(struct BigN));
+    cpy_to_user_kt = ktime_sub(ktime_get(), cpy_to_user_kt);
     return (ssize_t)sizeof(struct BigN);
 }
 
 /* write operation is skipped */
 static ssize_t fib_write(struct file *file, const char *buf, size_t size,
                          loff_t *offset) {
-    return ktime_to_ns(kt);
+    switch (size) {
+        case 0:
+            return ktime_to_ns(fib_kt);
+        case 1:
+            return ktime_to_ns(cpy_to_user_kt);
+    }
+    return 0;
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig) {

@@ -39,3 +39,8 @@ check: all
 	$(MAKE) unload
 	@diff -u out scripts/expected.txt && $(call pass)
 	@scripts/verify.py
+
+plot: client
+	sudo taskset 0x2 ./client > /dev/null
+	gnuplot run.gp
+	eog result.png &
